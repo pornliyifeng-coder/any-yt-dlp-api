@@ -16,12 +16,22 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
     if x_api_key != "Liyifeng11":
         raise HTTPException(status_code=401, detail="Unauthorized")
     
-    # 🚀 极简兼容模式：不强制格式，让引擎先拿到数据
+    # 🚀 终极模式：模拟各种环境并强制获取任意可用流
     ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
+        'quiet': False, # 开启日志以便在 Vercel 控制台查看
+        'no_warnings': False,
         'nocheckcertificate': True,
-        # 不写 'format' 键，让 yt-dlp 内部默认处理
+        'format': 'best', # 强制要求最好的单文件
+        'ignoreerrors': True,
+        'no_color': True,
+        'user_agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1',
+        'referer': 'https://www.youtube.com/',
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['ios', 'android', 'web'],
+                'player_skip': ['webpage', 'configs']
+            }
+        }
     }
 
     tmp_path = None
@@ -34,45 +44,41 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
             fd, tmp_path = tempfile.mkstemp(suffix=".txt")
             with os.fdopen(fd, 'w') as f:
                 f.write("# Netscape HTTP Cookie File\n")
-                pairs = req.cookies.split(';')
-                for pair in pairs:
+                for pair in req.cookies.split(';'):
                     if '=' in pair:
                         name, value = pair.strip().split('=', 1)
-                        f.write(f".{domain}\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}\n")
+                        f.write(f".youtube.com\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}\n")
             ydl_opts['cookiefile'] = tmp_path
         except Exception as e:
             print(f"❌ [Backend] Cookie Error: {e}")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 💡 关键：download=False 只获取元数据
+            # 1. 尝试直接获取
             info = ydl.extract_info(req.url, download=False)
             
-            # 手动挑选最佳可播放链接
-            play_url = None
+            if not info:
+                raise Exception("Failed to extract info (YouTube might be blocking the IP)")
+
+            play_url = info.get('url')
             
-            # 策略 1：直接获取主 URL
-            if info.get('url'):
-                play_url = info.get('url')
-            
-            # 策略 2：如果主 URL 不行，从 formats 里挑一个（音画合一的或 HLS）
+            # 2. 如果没有直接 URL，手动从 formats 列表打捞
             if not play_url and 'formats' in info:
-                # 寻找合并流
                 formats = info['formats']
+                # 寻找任何非音画分离的格式
+                valid = [f for f in formats if f.get('url') and (f.get('vcodec') != 'none' and f.get('acodec') != 'none')]
+                if not valid:
+                    # 如果连合并流都没有，尝试拿 HLS
+                    valid = [f for f in formats if f.get('protocol') == 'm3u8_native' or 'm3u8' in f.get('url', '')]
                 
-                # 1. 优先寻找 HLS (m3u8) - iOS 播放器的最爱
-                hls_streams = [f for f in formats if 'm3u8' in (f.get('protocol') or '') or f.get('ext') == 'm3u8']
-                if hls_streams:
-                    play_url = hls_streams[-1].get('url') # 取最高画质的 HLS
-                
-                # 2. 次选：包含音视频的 MP4
-                if not play_url:
-                    mp4_combined = [f for f in formats if f.get('ext') == 'mp4' and f.get('vcodec') != 'none' and f.get('acodec') != 'none']
-                    if mp4_combined:
-                        play_url = mp4_combined[-1].get('url')
+                if valid:
+                    # 选一个清晰度适中的（防止流量过大或加载慢）
+                    play_url = valid[-1].get('url')
 
             if not play_url:
-                raise Exception("No playable combined stream found")
+                # 打印所有格式 ID 供调试
+                format_ids = [f.get('format_id') for f in info.get('formats', [])]
+                raise Exception(f"No playable URL found. Available formats: {format_ids}")
 
             return {
                 "title": info.get('title'),
@@ -82,7 +88,7 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
             }
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ [Backend] Final Extraction failed: {error_msg}")
+        print(f"❌ [Backend] Fatal Error: {error_msg}")
         raise HTTPException(status_code=500, detail=error_msg)
     finally:
         if tmp_path and os.path.exists(tmp_path):
