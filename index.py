@@ -2,33 +2,43 @@ from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
 import yt_dlp
 import os
+import tempfile
 
 app = FastAPI()
 
 class ExtractReq(BaseModel):
     url: str
-    cookies: str = None
+    cookies: str = None # 接收从 App 传来的 Cookie 字符串
 
 @app.post("/extract")
 async def extract(req: ExtractReq, x_api_key: str = Header(None)):
-    # 校验 API Key，与 App 端保持一致
     if x_api_key != "Liyifeng11":
         raise HTTPException(status_code=401, detail="Unauthorized")
     
-    # yt-dlp 配置：只解析不下载，获取最佳画质直链
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'format': 'best',
         'nocheckcertificate': True,
     }
-    
+
+    # 💡 关键：处理传入的 Cookies
+    # 如果 App 传来了 Cookie 字符串，我们将其写入临时文件并交给 yt-dlp
+    tmp_cookie_file = None
+    if req.cookies and len(req.cookies) > 10:
+        try:
+            # 创建一个临时的 Netscape 格式 Cookie 文件或直接尝试通过 Header 传递
+            # 这里我们简单地通过 HTTP Headers 传递，yt-dlp 支持这种方式
+            ydl_opts['http_headers'] = {
+                'Cookie': req.cookies,
+                'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+            }
+        except Exception as e:
+            print(f"Cookie processing error: {e}")
+
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 提取视频信息
             info = ydl.extract_info(req.url, download=False)
-            
-            # 返回给 App 识别的格式
             return {
                 "title": info.get('title'),
                 "play_url": info.get('url'),
@@ -36,14 +46,10 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
                 "duration": info.get('duration')
             }
     except Exception as e:
-        print(f"Extraction error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        error_msg = str(e)
+        print(f"Extraction error: {error_msg}")
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "engine": "yt-dlp"}
-
-# 关键：Vercel 识别的入口
-@app.get("/")
-async def root():
-    return {"message": "YT Extractor API is running on Vercel!"}
