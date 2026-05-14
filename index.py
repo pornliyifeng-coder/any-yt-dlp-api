@@ -16,17 +16,16 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
     if x_api_key != "Liyifeng11":
         raise HTTPException(status_code=401, detail="Unauthorized")
     
-    # 🚀 优化配置：模拟 iOS 客户端以获取最佳 M3U8 流
+    # 🚀 修正配置：拥抱 HLS，模拟移动端环境
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        # 优先选择 mp4 格式或 m3u8 格式
-        'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+        # 允许所有格式，优先选择已经合并好的最佳流 (通常是 m3u8 或 mp4)
+        'format': 'best', 
         'extractor_args': {
             'youtube': {
-                'player_client': ['ios', 'web', 'mweb'],
-                'skip': ['hls', 'dash'] # 有时跳过某些限制反而能拿到直链
+                'player_client': ['ios', 'android', 'mweb']
             }
         }
     }
@@ -54,18 +53,20 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
             
-            # 💡 逻辑优化：自动寻找最适合播放的 URL
+            # 优先获取直链
             play_url = info.get('url')
             
-            # 如果是最佳格式（音画分离），yt-dlp 在 download=False 时可能只返回 manifest
-            # 我们尝试从 formats 列表里找一个单文件的直链
+            # 如果没有主 URL，说明是多流格式，我们遍历 formats 寻找一个合并好的流
             if not play_url and 'formats' in info:
-                # 过滤出包含音轨和视轨的格式 (acodec != none and vcodec != none)
-                combined_formats = [f for f in info['formats'] if f.get('acodec') != 'none' and f.get('vcodec') != 'none']
-                if combined_formats:
-                    # 按照分辨率排序取最好的一个
-                    best_f = sorted(combined_formats, key=lambda x: x.get('height') or 0, reverse=True)[0]
-                    play_url = best_f.get('url')
+                # 寻找支持的流：1. m3u8 2. 包含音画的 mp4
+                valid_formats = [f for f in info['formats'] if (f.get('vcodec') != 'none' and f.get('acodec') != 'none') or f.get('protocol') == 'm3u8_native']
+                if valid_formats:
+                    # 优先取 m3u8，因为它在 iOS 上最稳定
+                    hls_formats = [f for f in valid_formats if 'm3u8' in (f.get('protocol') or '')]
+                    if hls_formats:
+                        play_url = hls_formats[-1].get('url') # 取最高清晰度的 HLS
+                    else:
+                        play_url = valid_formats[-1].get('url')
 
             return {
                 "title": info.get('title'),
