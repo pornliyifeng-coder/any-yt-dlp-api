@@ -16,18 +16,12 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
     if x_api_key != "Liyifeng11":
         raise HTTPException(status_code=401, detail="Unauthorized")
     
-    # 🚀 修正配置：拥抱 HLS，模拟移动端环境
+    # 🚀 极简兼容模式：不强制格式，让引擎先拿到数据
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
         'nocheckcertificate': True,
-        # 允许所有格式，优先选择已经合并好的最佳流 (通常是 m3u8 或 mp4)
-        'format': 'best', 
-        'extractor_args': {
-            'youtube': {
-                'player_client': ['ios', 'android', 'mweb']
-            }
-        }
+        # 不写 'format' 键，让 yt-dlp 内部默认处理
     }
 
     tmp_path = None
@@ -47,26 +41,38 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
                         f.write(f".{domain}\tTRUE\t/\tTRUE\t2147483647\t{name}\t{value}\n")
             ydl_opts['cookiefile'] = tmp_path
         except Exception as e:
-            print(f"❌ [Backend] Cookie generation failed: {e}")
+            print(f"❌ [Backend] Cookie Error: {e}")
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            # 💡 关键：download=False 只获取元数据
             info = ydl.extract_info(req.url, download=False)
             
-            # 优先获取直链
-            play_url = info.get('url')
+            # 手动挑选最佳可播放链接
+            play_url = None
             
-            # 如果没有主 URL，说明是多流格式，我们遍历 formats 寻找一个合并好的流
+            # 策略 1：直接获取主 URL
+            if info.get('url'):
+                play_url = info.get('url')
+            
+            # 策略 2：如果主 URL 不行，从 formats 里挑一个（音画合一的或 HLS）
             if not play_url and 'formats' in info:
-                # 寻找支持的流：1. m3u8 2. 包含音画的 mp4
-                valid_formats = [f for f in info['formats'] if (f.get('vcodec') != 'none' and f.get('acodec') != 'none') or f.get('protocol') == 'm3u8_native']
-                if valid_formats:
-                    # 优先取 m3u8，因为它在 iOS 上最稳定
-                    hls_formats = [f for f in valid_formats if 'm3u8' in (f.get('protocol') or '')]
-                    if hls_formats:
-                        play_url = hls_formats[-1].get('url') # 取最高清晰度的 HLS
-                    else:
-                        play_url = valid_formats[-1].get('url')
+                # 寻找合并流
+                formats = info['formats']
+                
+                # 1. 优先寻找 HLS (m3u8) - iOS 播放器的最爱
+                hls_streams = [f for f in formats if 'm3u8' in (f.get('protocol') or '') or f.get('ext') == 'm3u8']
+                if hls_streams:
+                    play_url = hls_streams[-1].get('url') # 取最高画质的 HLS
+                
+                # 2. 次选：包含音视频的 MP4
+                if not play_url:
+                    mp4_combined = [f for f in formats if f.get('ext') == 'mp4' and f.get('vcodec') != 'none' and f.get('acodec') != 'none']
+                    if mp4_combined:
+                        play_url = mp4_combined[-1].get('url')
+
+            if not play_url:
+                raise Exception("No playable combined stream found")
 
             return {
                 "title": info.get('title'),
@@ -76,7 +82,7 @@ async def extract(req: ExtractReq, x_api_key: str = Header(None)):
             }
     except Exception as e:
         error_msg = str(e)
-        print(f"❌ [Backend] Extraction failed: {error_msg}")
+        print(f"❌ [Backend] Final Extraction failed: {error_msg}")
         raise HTTPException(status_code=500, detail=error_msg)
     finally:
         if tmp_path and os.path.exists(tmp_path):
