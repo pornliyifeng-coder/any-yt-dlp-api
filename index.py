@@ -31,19 +31,21 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
     temp_cookie_file = None
     try:
         ydl_opts = {
-            # 🚀 优先寻找可直接播放的单文件格式
-            'format': '18/22/best',
+            # 🚀 既然服务器没 ffmpeg，我们就要最稳的单文件
+            'format': 'best[ext=mp4]/best',
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
             'ignoreerrors': False,
-            # 🚀 绕过 n-challenge 加密的关键：强行使用 Android/iOS 客户端
+            # 🚀 核心：彻底模拟 Android 客户端，避开网页端的各种挑战和封锁
             'extractor_args': {
                 'youtube': {
-                    'player_client': ['android', 'ios'],
+                    'player_client': ['android'],
+                    'skip': ['hls', 'dash']
                 }
             },
-            'user_agent': req.user_agent or 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
+            # 使用安卓 YouTube App 的 User-Agent
+            'user_agent': 'com.google.android.youtube/19.14.34 (Linux; U; Android 11) gzip'
         }
 
         if req.cookies:
@@ -55,14 +57,14 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
             if not info:
-                raise Exception("yt-dlp returned no info")
+                raise Exception("Empty info returned from yt-dlp")
                 
-            # 智能查找有效播放地址
             stream_url = info.get('url')
+            # 如果没拿到直链，去 formats 列表里搜刮一下
             if not stream_url and 'formats' in info:
-                # 倒序查找，通常后面的质量更好
+                # 找一个 ext 是 mp4 且有 url 的
                 for f in reversed(info['formats']):
-                    if f.get('url') and f.get('vcodec') != 'none':
+                    if f.get('url') and (f.get('ext') == 'mp4' or f.get('vcodec') != 'none'):
                         stream_url = f['url']
                         break
 
