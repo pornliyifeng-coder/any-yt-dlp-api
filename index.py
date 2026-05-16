@@ -31,20 +31,19 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
     temp_cookie_file = None
     try:
         ydl_opts = {
-            # 🚀 既然服务器没 ffmpeg，我们就要最稳的单文件
-            'format': 'best[ext=mp4]/best',
+            'format': 'best',
+            # 🚀 绝招：强制使用 IPv4，避开 YouTube 对 Vercel IPv6 的严厉封锁
+            'source_address': '0.0.0.0', 
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
             'ignoreerrors': False,
-            # 🚀 核心：彻底模拟 Android 客户端，避开网页端的各种挑战和封锁
+            # 模拟安卓 YouTube App
             'extractor_args': {
                 'youtube': {
                     'player_client': ['android'],
-                    'skip': ['hls', 'dash']
                 }
             },
-            # 使用安卓 YouTube App 的 User-Agent
             'user_agent': 'com.google.android.youtube/19.14.34 (Linux; U; Android 11) gzip'
         }
 
@@ -57,14 +56,12 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
             if not info:
-                raise Exception("Empty info returned from yt-dlp")
+                raise Exception("yt-dlp returned no info")
                 
             stream_url = info.get('url')
-            # 如果没拿到直链，去 formats 列表里搜刮一下
             if not stream_url and 'formats' in info:
-                # 找一个 ext 是 mp4 且有 url 的
                 for f in reversed(info['formats']):
-                    if f.get('url') and (f.get('ext') == 'mp4' or f.get('vcodec') != 'none'):
+                    if f.get('url') and f.get('vcodec') != 'none':
                         stream_url = f['url']
                         break
 
