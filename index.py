@@ -4,7 +4,6 @@ from typing import Optional
 import yt_dlp
 import os
 import tempfile
-import sys
 
 app = FastAPI()
 
@@ -14,7 +13,7 @@ class ExtractReq(BaseModel):
     user_agent: Optional[str] = None
 
 def parse_cookies(cookie_str: str, temp_file_path: str):
-    """更严格的 Netscape 格式生成"""
+    """生成 Netscape 格式 Cookie 文件"""
     with open(temp_file_path, 'w') as f:
         f.write('# Netscape HTTP Cookie File\n')
         for cookie in cookie_str.split(';'):
@@ -22,8 +21,6 @@ def parse_cookies(cookie_str: str, temp_file_path: str):
                 parts = cookie.strip().split('=', 1)
                 if len(parts) == 2:
                     name, value = parts
-                    # 使用标准 Tab 分隔符，并确保包含 7 个字段
-                    # 域名, 子域名可用, 路径, 安全, 过期时间, 名称, 值
                     f.write(f'.youtube.com\tTRUE\t/\tFALSE\t2147483647\t{name}\t{value}\n')
 
 @app.post("/extract")
@@ -34,12 +31,19 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
     temp_cookie_file = None
     try:
         ydl_opts = {
-            'format': 'best', # 还原为最稳的 best，让服务器自己选
-            'quiet': False,   # 🚀 开启日志，方便调试
-            'no_warnings': False,
+            # 🚀 优先寻找可直接播放的单文件格式
+            'format': '18/22/best',
+            'quiet': True,
+            'no_warnings': True,
             'nocheckcertificate': True,
             'ignoreerrors': False,
-            'user_agent': req.user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            # 🚀 绕过 n-challenge 加密的关键：强行使用 Android/iOS 客户端
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'ios'],
+                }
+            },
+            'user_agent': req.user_agent or 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1'
         }
 
         if req.cookies:
@@ -49,36 +53,28 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
             ydl_opts['cookiefile'] = temp_cookie_file
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # 🚀 尝试获取信息
-            try:
-                info = ydl.extract_info(req.url, download=False)
-            except Exception as ydl_err:
-                # 捕获 yt-dlp 内部的明确报错
-                raise HTTPException(status_code=500, detail=f"yt-dlp error: {str(ydl_err)}")
-                
+            info = ydl.extract_info(req.url, download=False)
             if not info:
-                raise HTTPException(status_code=500, detail="yt-dlp returned empty info")
-
-            # 提取地址逻辑
-            url = info.get('url')
-            if not url and 'formats' in info:
-                # 找一个有直链的格式
-                valid_formats = [f for f in info['formats'] if f.get('url')]
-                if valid_formats:
-                    # 优先找 MP4，否则找最后一个（通常是质量最好的）
-                    url = next((f['url'] for f in valid_formats if f.get('ext') == 'mp4'), valid_formats[-1]['url'])
+                raise Exception("yt-dlp returned no info")
+                
+            # 智能查找有效播放地址
+            stream_url = info.get('url')
+            if not stream_url and 'formats' in info:
+                # 倒序查找，通常后面的质量更好
+                for f in reversed(info['formats']):
+                    if f.get('url') and f.get('vcodec') != 'none':
+                        stream_url = f['url']
+                        break
 
             return {
-                "url": url or info.get('webpage_url'),
+                "url": stream_url or info.get('webpage_url'),
                 "title": info.get('title'),
                 "poster": info.get('thumbnail'),
                 "duration": info.get('duration')
             }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         if temp_cookie_file and os.path.exists(temp_cookie_file):
             os.remove(temp_cookie_file)
