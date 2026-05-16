@@ -4,16 +4,17 @@ from typing import Optional
 import yt_dlp
 import os
 import tempfile
+import sys
 
 app = FastAPI()
 
 class ExtractReq(BaseModel):
     url: str
     cookies: Optional[str] = None
-    user_agent: Optional[str] = None  # 🚀 新增：支持从 App 传入 UA
+    user_agent: Optional[str] = None
 
 def parse_cookies(cookie_str: str, temp_file_path: str):
-    """将字符串 Cookie 转换为 Netscape 格式文件"""
+    """更严格的 Netscape 格式生成"""
     with open(temp_file_path, 'w') as f:
         f.write('# Netscape HTTP Cookie File\n')
         for cookie in cookie_str.split(';'):
@@ -21,8 +22,9 @@ def parse_cookies(cookie_str: str, temp_file_path: str):
                 parts = cookie.strip().split('=', 1)
                 if len(parts) == 2:
                     name, value = parts
-                    # 扩展域名覆盖，确保全站通用
-                    f.write(f'.youtube.com\tTRUE\t/\tFALSE\t0\t{name}\t{value}\n')
+                    # 使用标准 Tab 分隔符，并确保包含 7 个字段
+                    # 域名, 子域名可用, 路径, 安全, 过期时间, 名称, 值
+                    f.write(f'.youtube.com\tTRUE\t/\tFALSE\t2147483647\t{name}\t{value}\n')
 
 @app.post("/extract")
 async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
@@ -31,20 +33,14 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
 
     temp_cookie_file = None
     try:
-        # 🌟 更加鲁棒的配置
-                ydl_opts = {
-            'format': '18/22/best', 
-            'quiet': True,
-            'no_warnings': True,
+        ydl_opts = {
+            'format': 'best', # 还原为最稳的 best，让服务器自己选
+            'quiet': False,   # 🚀 开启日志，方便调试
+            'no_warnings': False,
             'nocheckcertificate': True,
-            'ignoreerrors': False,  # 🚀 改成 False，我们要看真正的错误原因
-            'no_color': True,
+            'ignoreerrors': False,
+            'user_agent': req.user_agent or 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         }
-
-
-        # 🚀 注入 App 端的 User-Agent，确保指纹一致
-        if req.user_agent:
-            ydl_opts['user_agent'] = req.user_agent
 
         if req.cookies:
             fd, temp_cookie_file = tempfile.mkstemp()
@@ -53,28 +49,36 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
             ydl_opts['cookiefile'] = temp_cookie_file
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(req.url, download=False)
-            if not info:
-                raise Exception("Unable to extract info")
+            # 🚀 尝试获取信息
+            try:
+                info = ydl.extract_info(req.url, download=False)
+            except Exception as ydl_err:
+                # 捕获 yt-dlp 内部的明确报错
+                raise HTTPException(status_code=500, detail=f"yt-dlp error: {str(ydl_err)}")
                 
-            # 💡 优先寻找直链地址
-            stream_url = info.get('url')
-            if not stream_url and 'formats' in info:
-                # 如果 top-level 没有 url，从 formats 里找一个最匹配的
-                for f in reversed(info['formats']):
-                    if f.get('vcodec') != 'none' and f.get('url'):
-                        stream_url = f['url']
-                        break
+            if not info:
+                raise HTTPException(status_code=500, detail="yt-dlp returned empty info")
+
+            # 提取地址逻辑
+            url = info.get('url')
+            if not url and 'formats' in info:
+                # 找一个有直链的格式
+                valid_formats = [f for f in info['formats'] if f.get('url')]
+                if valid_formats:
+                    # 优先找 MP4，否则找最后一个（通常是质量最好的）
+                    url = next((f['url'] for f in valid_formats if f.get('ext') == 'mp4'), valid_formats[-1]['url'])
 
             return {
-                "url": stream_url or info.get('webpage_url'),
+                "url": url or info.get('webpage_url'),
                 "title": info.get('title'),
                 "poster": info.get('thumbnail'),
                 "duration": info.get('duration')
             }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")
     finally:
         if temp_cookie_file and os.path.exists(temp_cookie_file):
             os.remove(temp_cookie_file)
