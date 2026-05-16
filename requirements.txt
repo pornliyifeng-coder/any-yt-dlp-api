@@ -1,4 +1,3 @@
+yt-dlp
 fastapi
 uvicorn
-yt-dlp>=2024.3.10
-pydantic
