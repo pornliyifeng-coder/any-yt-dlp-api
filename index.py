@@ -10,6 +10,7 @@ app = FastAPI()
 class ExtractReq(BaseModel):
     url: str
     cookies: Optional[str] = None
+    user_agent: Optional[str] = None  # 🚀 新增：支持从 App 传入 UA
 
 def parse_cookies(cookie_str: str, temp_file_path: str):
     """将字符串 Cookie 转换为 Netscape 格式文件"""
@@ -17,26 +18,33 @@ def parse_cookies(cookie_str: str, temp_file_path: str):
         f.write('# Netscape HTTP Cookie File\n')
         for cookie in cookie_str.split(';'):
             if '=' in cookie:
-                name, value = cookie.strip().split('=', 1)
-                # 为 YouTube 强制关联域名，确保 Cookie 生效
-                f.write(f'.youtube.com\tTRUE\t/\tFALSE\t0\t{name}\t{value}\n')
+                parts = cookie.strip().split('=', 1)
+                if len(parts) == 2:
+                    name, value = parts
+                    # 扩展域名覆盖，确保全站通用
+                    f.write(f'.youtube.com\tTRUE\t/\tFALSE\t0\t{name}\t{value}\n')
 
 @app.post("/extract")
 async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
-    # 验证 API Key (保持您原有的逻辑)
     if x_api_key != "Liyifeng11":
         raise HTTPException(status_code=401, detail="Unauthorized")
 
     temp_cookie_file = None
     try:
+        # 🌟 更加鲁棒的配置
         ydl_opts = {
-            # 🚀 核心优化：优先请求单文件 MP4 格式，避开需要 FFmpeg 合并的 DASH 流
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            # 🚀 宽容的格式选择：18(360p MP4) -> 22(720p MP4) -> 任意最优
+            'format': '18/22/best', 
             'quiet': True,
             'no_warnings': True,
-            # 💡 强制使用这些客户端可以提高解析成功率，避开部分限制
-            'player_client': ['tv', 'mweb'], 
+            'nocheckcertificate': True,
+            'ignoreerrors': True,
+            'no_color': True,
         }
+
+        # 🚀 注入 App 端的 User-Agent，确保指纹一致
+        if req.user_agent:
+            ydl_opts['user_agent'] = req.user_agent
 
         if req.cookies:
             fd, temp_cookie_file = tempfile.mkstemp()
@@ -46,10 +54,20 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(req.url, download=False)
-            
-            # 返回 App 预期的字段名
+            if not info:
+                raise Exception("Unable to extract info")
+                
+            # 💡 优先寻找直链地址
+            stream_url = info.get('url')
+            if not stream_url and 'formats' in info:
+                # 如果 top-level 没有 url，从 formats 里找一个最匹配的
+                for f in reversed(info['formats']):
+                    if f.get('vcodec') != 'none' and f.get('url'):
+                        stream_url = f['url']
+                        break
+
             return {
-                "url": info.get('url') or info.get('webpage_url'),
+                "url": stream_url or info.get('webpage_url'),
                 "title": info.get('title'),
                 "poster": info.get('thumbnail'),
                 "duration": info.get('duration')
