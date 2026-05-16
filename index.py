@@ -32,15 +32,15 @@ async def extract(req: ExtractReq, x_api_key: Optional[str] = Header(None)):
     temp_cookie_file = None
     try:
         # 🌟 更加鲁棒的配置
-        ydl_opts = {
-            # 🚀 宽容的格式选择：18(360p MP4) -> 22(720p MP4) -> 任意最优
+                ydl_opts = {
             'format': '18/22/best', 
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
-            'ignoreerrors': True,
+            'ignoreerrors': False,  # 🚀 改成 False，我们要看真正的错误原因
             'no_color': True,
         }
+
 
         # 🚀 注入 App 端的 User-Agent，确保指纹一致
         if req.user_agent:
